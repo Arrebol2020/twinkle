@@ -115,6 +115,68 @@
 
 下面按这份 YAML 逐段对照说明，你可以直接按自己的 GPU 数量与对外策略改：
 
+#### (0) 字段候选值速查（这份 YAML 里常见的可选项）
+
+这一小节专门回答“这个字段还能怎么填、不同候选值代表什么、我该选哪个”。候选值会随 Twinkle/Ray 版本演进，但下列是自建单机多卡场景最常用的选择。
+
+- **`proxy_location`**
+  - **`EveryNode`**：每个 Ray 节点各起一个 HTTP proxy（多节点时通常更合理，减少跨节点转发）。
+  - **`HeadOnly`/`HeadOnly` 类模式**：只在 head 节点起 proxy（单机时通常够用；多节点可能造成入口瓶颈）。
+  - **选择建议**：单机优先简单可用；多机优先 `EveryNode`。
+
+- **`applications[].import_path`**
+  - **`server`**：统一网关（FastAPI ingress），对外入口建议只暴露它。
+  - **`model`**：训练模型服务（Transformers 或 Megatron 后端）。
+  - **`sampler`**：推理/采样服务（如 vLLM/TorchSampler）。
+  - **`processor`**：CPU 处理/预处理服务。
+
+- **`applications[].route_prefix`**
+  - 候选值本质是**任意 URL 前缀**（例如 `/api/v1`、`/api/v1/model/<...>`）。
+  - **选择建议**：对外保持稳定版本前缀（如 `/api/v1`），内部再细分 `/model/...` `/sampler/...`。
+
+- **`applications[].deployments[].autoscaling_config`**
+  - **`min_replicas/max_replicas`**：固定副本或允许弹性扩缩。
+  - **选择建议（单机）**：先固定 `min=max=1`，跑稳后再扩；单机扩副本很容易抢 GPU/显存导致抖动。
+
+- **`applications[].deployments[].ray_actor_options`**
+  - **`num_cpus`**：CPU 资源声明（网关/管理类一般很小即可）。
+  - **`num_gpus`**：GPU 资源声明（如果该 actor/replica 需要独占/占用 GPU，应该显式声明）。
+  - **选择建议**：网关/processor 通常 `num_gpus=0`；训练/采样服务通常要么显式 `num_gpus`，要么通过其内部启动的 worker/进程去占用 GPU（两者不要“重复分配”）。
+
+- **`applications[model].args.use_megatron`**
+  - **`false`**：Transformers 后端（更通用，适合先跑通）。
+  - **`true`**：Megatron 后端（更偏大规模训练/特定模型栈）。
+  - **选择建议**：单机自建先 `false`，确认稳定后再切换/扩展。
+
+- **`applications[*].args.model_id`**
+  - 常见 URI：
+    - **`ms://...`**：ModelScope Hub
+    - **`hf://...`**：HuggingFace Hub（取决于项目是否支持/你本地网络与缓存策略）
+    - **本地路径**：例如挂载的模型目录（适合生产环境减少外网依赖）
+  - **选择建议**：生产优先本地路径或自建对象存储/镜像缓存；开发期用 `ms://` 快速验证。
+
+- **`device_group.device_type`**
+  - **`cuda`**：NVIDIA GPU。
+  - **`CPU`**：CPU 任务（processor 常用）。
+  - **选择建议**：训练/采样用 `cuda`；预处理用 `CPU`。
+
+- **`device_group.ranks` / `device_mesh.dp_size`**
+  - 通常是正整数，表示使用的设备数量/并行维度大小。
+  - **选择建议**：单机先用 `1` 跑通；多卡要提升时，优先在“你清楚显存与通信拓扑”的前提下逐步增加。
+
+- **`queue_config.rps_limit` / `queue_config.tps_limit`**
+  - 正整数（也可能允许 0/None 表示不限制，取决于实现）。
+  - **选择建议**：对外服务**不要无限制**；先保守，再根据 GPU 利用率与延迟调大。
+
+- **`sampler_type`**
+  - **`vllm`**：高性能推理引擎（通常更快，但要关注显存占用与参数限制）。
+  - **`torch`**：TorchSampler（更朴素、依赖少，适合作为保底路径）。
+  - **选择建议**：需要高吞吐推理选 `vllm`；想先跑通/更稳选 `torch`。
+
+- **`engine_args.gpu_memory_utilization`（vLLM）**
+  - 浮点数 \(0.0 \sim 1.0\)。
+  - **选择建议**：训练+推理同机时尽量保守（0.3~0.6）；只推理可适当调高。
+
 #### (1) `http_options`：对外监听地址与端口
 
 这决定了你对外提供服务的监听地址/端口（反代时通常只对外暴露 443）：
