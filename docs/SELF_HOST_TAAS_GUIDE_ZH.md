@@ -111,6 +111,142 @@
 
 ---
 
+### 2.3 结合 `cookbook/client/server/transformer/server_config.yaml`：字段速读与单机多卡改法
+
+下面按这份 YAML 逐段对照说明，你可以直接按自己的 GPU 数量与对外策略改：
+
+#### (1) `http_options`：对外监听地址与端口
+
+这决定了你对外提供服务的监听地址/端口（反代时通常只对外暴露 443）：
+
+- `http_options.host`
+  - 单机自部署常用：`0.0.0.0`（监听所有网卡）
+- `http_options.port`
+  - 例子里是 `8000`
+
+#### (2) `proxy_location`
+
+- 例子是 `EveryNode`（更偏多节点场景）
+- 单机通常用哪个都行；你后续做多机时再重点研究它对网络路径/吞吐的影响
+
+#### (3) `applications[server]`：统一网关（强烈建议对外只暴露这一层）
+
+```yaml
+- name: server
+  route_prefix: /api/v1
+  import_path: server
+  args:
+    server_config:
+      per_token_model_limit: 3
+    supported_models:
+      - Qwen/Qwen3.5-4B
+```
+
+你需要重点理解/按需求修改：
+
+- `route_prefix: /api/v1`
+  - 对外 API 前缀。你给客户的 `base_url` 一般是 `https://你的域名`，路径由 client 侧拼上 `/api/v1/...`
+- `server_config.per_token_model_limit`
+  - **平台化关键参数**：每个 API key（token）最多能创建/持有多少个 adapter/model（多租户隔离与资源上限）
+- `supported_models`
+  - 用于校验/提示支持的 base model 列表（对外产品化时建议明确维护）
+
+部署层（Ray Serve）关键字段：
+
+- `max_ongoing_requests`
+- `autoscaling_config.min_replicas/max_replicas`
+  - 单机阶段一般固定 `1`
+- `ray_actor_options.num_cpus`
+  - 网关本身很轻，例子里是 `0.1`
+
+#### (4) `applications[model-*]`：训练模型服务（真正消耗 GPU 的地方）
+
+这份 YAML 的 model 服务已经写出来（不是注释），用于承载训练侧的 model worker：
+
+```yaml
+- name: models-Qwen3.5-4B
+  route_prefix: /api/v1/model/Qwen/Qwen3.5-4B
+  import_path: model
+  args:
+    model_id: "ms://Qwen/Qwen3.5-4B"
+    nproc_per_node: 1
+    device_group:
+      ranks: 1
+      device_type: cuda
+    queue_config:
+      rps_limit: 100
+      tps_limit: 100000
+```
+
+你在“单机多卡”需要优先关注：
+
+- `args.nproc_per_node`
+  - **它决定每台机器起多少个 GPU 进程/worker**（常用于把训练切到多进程并行或多卡）
+  - 单机先从 `1` 跑通；要吃满多卡再逐步增大并验证显存/通信开销
+- `device_group.ranks`
+  - 逻辑上“这个服务要用几张卡”。例子是 `1`
+- `device_mesh.dp_size`
+  - 数据并行维度的配置（单机先按最简单跑通，再调整）
+- `queue_config.rps_limit/tps_limit`
+  - **对外服务稳定性关键**：建议先保守（小一点），跑稳后再提
+
+安全相关：
+
+- `TWINKLE_TRUST_REMOTE_CODE: "0"`
+  - 建议保持关闭（避免加载不可信 remote code）
+
+#### (5) `applications[sampler-*]`：采样/推理服务（vLLM）
+
+采样服务往往用于评测、采样、生成等：
+
+```yaml
+- name: sampler-Qwen3.5-4B
+  route_prefix: /api/v1/sampler/Qwen/Qwen3.5-4B
+  import_path: sampler
+  args:
+    sampler_type: vllm
+    nproc_per_node: 2
+    engine_args:
+      gpu_memory_utilization: 0.5
+      enable_lora: true
+```
+
+你在单机多卡要优先关注：
+
+- `nproc_per_node`
+  - 推理侧进程数，过大容易抢占资源/显存；建议从 `1` 起步
+- `engine_args.gpu_memory_utilization`
+  - 这是 vLLM 的显存占用比例；如果你同时要训练 + 推理，通常需要 **更保守**（比如 0.3~0.6 之间按实际调整）
+- `enable_lora: true`
+  - 若你需要加载训练出来的 LoRA 做评测/推理，需要开启
+
+#### (6) `applications[processor]`：CPU 侧处理服务
+
+processor 主要用于 CPU 处理/预处理等：
+
+- `ncpu_proc_per_node`
+- `device_group.device_type: CPU`
+
+单机阶段一般照默认跑通即可，后续根据 CPU 核数与瓶颈调整。
+
+---
+
+### 2.4 单机多卡的“起步配置”建议（先稳再快）
+
+如果你是单机 \(N\) 卡，建议用这个策略起步，然后再逐步加大并发/进程数：
+
+- 网关 `server`：`min_replicas=max_replicas=1`
+- `model`：
+  - 先 `nproc_per_node=1` 跑通
+  - 跑稳后再把 `device_group.ranks` / `nproc_per_node` 提升，并确保 GPU 不互相抢占
+- `sampler`：
+  - 如果训练期不需要推理，可先减少资源（甚至暂不部署）
+  - 需要推理时，先把 `gpu_memory_utilization` 调保守，避免挤爆训练显存
+- 限流：
+  - 先把 `rps_limit/tps_limit` 设小一点，先验证超时/排队/失败路径是可控的
+
+---
+
 ### 3. 基于你需求做改造：建议按优先级落地
 
 下面以“公网可用”为目标，按优先级列出改造项。你不需要一次做完，建议每次只做一个小闭环。
