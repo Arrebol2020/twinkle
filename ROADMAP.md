@@ -70,12 +70,12 @@
 ### 网络能力
 
 - [ ] 优化server multi-LoRA训练吞吐
-  - [ ] 推荐并完善`forward_backward` + `clip_grad_and_step`的训练路径，减少HTTP请求和队列任务数量
-  - [ ] 提供server侧`train_step`融合接口，将forward、loss、backward、clip、step、zero_grad、lr_step合并为单个计算任务
-  - [ ] 基于短时间窗口实现multi-LoRA训练请求合批，按adapter、任务类型和序列长度bucket调度
-  - [ ] 支持跨adapter的fused forward/backward原型，使不同LoRA租户共享base model计算并分别回写LoRA梯度
-  - [ ] 优化compute queue调度策略，在公平性约束下减少adapter切换并提升GPU占用率
-  - [ ] 将tokenize、packing、padding-free collate等可前移的数据处理异步化，降低模型端compute worker占用
+  - [ ] 第一阶段：沉淀现有高吞吐训练最佳实践，明确推荐较大的token batch、`PackingDataset`/`padding_free=True`、`gradient_accumulation_steps`以及`forward_backward` + `clip_grad_and_step`路径
+  - [ ] 第二阶段：提供server侧`train_step`融合接口，将forward、loss、backward、clip、step、zero_grad、lr_step合并为单个计算任务，减少HTTP请求和队列任务数量
+  - [ ] 第三阶段：在`ComputeWorker`中增加`batch_window_ms`，极短时间窗内收集多个`forward_backward`/`train_step`请求，按adapter、任务类型和序列长度bucket调度
+  - [ ] 第三阶段：支持按adapter连续调度，在公平性约束下允许同一adapter连续执行N个microbatch，减少adapter切换并提升GPU占用率
+  - [ ] 第四阶段：支持跨adapter的fused forward/backward原型，允许batch内样本携带`adapter_id`，共享base model计算并分别scatter/accumulate LoRA梯度
+  - [ ] 将tokenize、packing、padding-free collate等可前移的数据处理放到client/dataloader侧或异步后台，降低模型端compute worker占用
   - [ ] 建立吞吐benchmark和指标看板，覆盖单租户、多租户、小batch、长序列、Transformers和Megatron后端
 
 ## English
@@ -99,10 +99,10 @@
 ### Networking Capabilities
 
 - [ ] Optimize server multi-LoRA training throughput
-  - [ ] Promote and harden the `forward_backward` + `clip_grad_and_step` training path to reduce HTTP round trips and queued compute tasks
-  - [ ] Add a server-side `train_step` API that fuses forward, loss, backward, clipping, optimizer step, zero_grad, and lr_step into one compute task
-  - [ ] Implement short-window batching for multi-LoRA training requests, bucketed by adapter, task type, and sequence length
-  - [ ] Prototype cross-adapter fused forward/backward so different LoRA tenants can share base-model compute while accumulating separate LoRA gradients
-  - [ ] Improve compute-queue scheduling to reduce adapter switching while preserving tenant fairness
-  - [ ] Move or async offload eligible data processing such as tokenization, packing, and padding-free collation to reduce model-side compute-worker occupancy
+  - [ ] Phase 1: Document and harden current high-throughput practices, including larger token batches, `PackingDataset`/`padding_free=True`, `gradient_accumulation_steps`, and the `forward_backward` + `clip_grad_and_step` path
+  - [ ] Phase 2: Add a server-side `train_step` API that fuses forward, loss, backward, clipping, optimizer step, zero_grad, and lr_step into one compute task to reduce HTTP round trips and queued tasks
+  - [ ] Phase 3: Add `batch_window_ms` to `ComputeWorker` so it can collect multiple `forward_backward`/`train_step` requests in a short window and bucket them by adapter, task type, and sequence length
+  - [ ] Phase 3: Add adapter-contiguous scheduling so the queue can run N microbatches from the same adapter under fairness constraints, reducing adapter switches and improving GPU occupancy
+  - [ ] Phase 4: Prototype cross-adapter fused forward/backward, allowing samples in one batch to carry `adapter_id`, share base-model compute, and scatter/accumulate separate LoRA gradients
+  - [ ] Move or async offload eligible data processing such as tokenization, packing, and padding-free collation to the client/dataloader side to reduce model-side compute-worker occupancy
   - [ ] Add throughput benchmarks and dashboards covering single-tenant, multi-tenant, small-batch, long-sequence, Transformers, and Megatron scenarios
