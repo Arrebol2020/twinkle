@@ -11,7 +11,8 @@
 from typing import Any, Dict, List, Optional, Union
 from twinkle_client.http import http_post
 from twinkle.sampler.base import Sampler
-from twinkle_client.types.sampler import AddAdapterResponse, SampleResponseModel, SetTemplateResponse
+from twinkle_client.types.sampler import (AddAdapterResponse, CalculateMetricResponse, SampleResponseModel,
+                                          SetTemplateResponse)
 from peft import PeftConfig
 from twinkle.data_format import Trajectory, InputFeature
 
@@ -94,6 +95,15 @@ class vLLMSampler(Sampler):
         )
         response.raise_for_status()
         return SetTemplateResponse(**response.json())
+
+    def calculate_metric(self, reset: bool = True) -> Dict[str, Any]:
+        """Return sampler throughput metrics."""
+        response = http_post(
+            url=f'{self.server_url}/calculate_metric',
+            json_data={'reset': reset}
+        )
+        response.raise_for_status()
+        return CalculateMetricResponse(**response.json()).result
     
     def apply_patch(self, patch_cls: str, **kwargs) -> None:
         """Apply a patch to the model."""

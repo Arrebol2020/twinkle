@@ -24,6 +24,7 @@ import atexit
 import numpy as np
 import os
 import threading
+import time
 from typing import Any, Dict, List, Optional, Type, Union
 
 from twinkle import DeviceMesh, get_logger, remote_class, remote_function, requires
@@ -54,6 +55,43 @@ def _convert_ndarray_to_list(obj: Any) -> Any:
     return obj
 
 
+def _collect_sample_metrics(results: List[Dict[str, Any]], device_mesh: DeviceMesh = None) -> Dict[str, Any]:
+    del device_mesh
+    if not results:
+        return {}
+
+    interval_prompt_tokens = sum(r.get('interval_prompt_tokens', 0) for r in results)
+    interval_output_tokens = sum(r.get('interval_output_tokens', 0) for r in results)
+    interval_requests = sum(r.get('interval_requests', 0) for r in results)
+    interval_sequences = sum(r.get('interval_sequences', 0) for r in results)
+    interval_time = max((r.get('interval_time', 0.0) for r in results), default=0.0)
+
+    total_prompt_tokens = sum(r.get('total_prompt_tokens', 0) for r in results)
+    total_output_tokens = sum(r.get('total_output_tokens', 0) for r in results)
+    total_requests = sum(r.get('total_requests', 0) for r in results)
+    total_sequences = sum(r.get('total_sequences', 0) for r in results)
+    total_time = max((r.get('total_time', 0.0) for r in results), default=0.0)
+
+    metrics = {
+        'sample/interval prompt tokens': interval_prompt_tokens,
+        'sample/interval output tokens': interval_output_tokens,
+        'sample/interval requests': interval_requests,
+        'sample/interval sequences': interval_sequences,
+        'sample/active time': f'{interval_time:.2f} seconds',
+        'sample/total prompt tokens': total_prompt_tokens,
+        'sample/total output tokens': total_output_tokens,
+        'sample/total requests': total_requests,
+        'sample/total sequences': total_sequences,
+    }
+    if interval_time > 0:
+        metrics['sample/prompt_tokens/s'] = f'{interval_prompt_tokens / interval_time:.2f}'
+        metrics['sample/output_tokens/s'] = f'{interval_output_tokens / interval_time:.2f}'
+        metrics['sample/total_tokens/s'] = f'{(interval_prompt_tokens + interval_output_tokens) / interval_time:.2f}'
+    if total_time > 0:
+        metrics['sample/lifetime output_tokens/s'] = f'{total_output_tokens / total_time:.2f}'
+    return metrics
+
+
 @remote_class()
 class vLLMSampler(Sampler, CheckpointEngineMixin):
     """A vLLM-based sampler using VLLMEngine (AsyncLLM).
@@ -80,6 +118,16 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
 
         self.model_id = model_id
         self.device_mesh = device_mesh
+        self._sample_total_prompt_tokens = 0
+        self._sample_total_output_tokens = 0
+        self._sample_total_requests = 0
+        self._sample_total_sequences = 0
+        self._sample_total_time = 0.0
+        self._sample_interval_prompt_tokens = 0
+        self._sample_interval_output_tokens = 0
+        self._sample_interval_requests = 0
+        self._sample_interval_sequences = 0
+        self._sample_interval_time = 0.0
 
         # Create a dedicated background event loop for vLLM async operations.
         # This is necessary because:
@@ -364,8 +412,58 @@ class vLLMSampler(Sampler, CheckpointEngineMixin):
             ]
             return await asyncio.gather(*tasks)
 
+        start_time = time.perf_counter()
         sample_results = self._run_in_loop(_sample_all())
+        elapsed = time.perf_counter() - start_time
+        self._record_sample_metrics(sample_results, elapsed)
         return sample_results
+
+    def _record_sample_metrics(self, sample_results: List[SampleResponse], elapsed: float) -> None:
+        prompt_tokens = sum(len(response.prompt_token_ids or []) for response in sample_results)
+        output_tokens = sum(len(sequence.tokens or []) for response in sample_results for sequence in response.sequences)
+        requests = len(sample_results)
+        sequences = sum(len(response.sequences) for response in sample_results)
+
+        self._sample_total_prompt_tokens += prompt_tokens
+        self._sample_total_output_tokens += output_tokens
+        self._sample_total_requests += requests
+        self._sample_total_sequences += sequences
+        self._sample_total_time += elapsed
+        self._sample_interval_prompt_tokens += prompt_tokens
+        self._sample_interval_output_tokens += output_tokens
+        self._sample_interval_requests += requests
+        self._sample_interval_sequences += sequences
+        self._sample_interval_time += elapsed
+
+        output_tps = output_tokens / elapsed if elapsed > 0 else 0.0
+        total_tps = (prompt_tokens + output_tokens) / elapsed if elapsed > 0 else 0.0
+        logger.info(
+            'Sample throughput: '
+            f'output_tokens/s={output_tps:.2f}, total_tokens/s={total_tps:.2f}, '
+            f'prompt_tokens={prompt_tokens}, output_tokens={output_tokens}, '
+            f'requests={requests}, sequences={sequences}, time={elapsed:.2f}s')
+
+    @remote_function(dispatch='all', collect=_collect_sample_metrics, lazy_collect=False)
+    def calculate_metric(self, reset: bool = True) -> Dict[str, Any]:
+        metrics = {
+            'interval_prompt_tokens': self._sample_interval_prompt_tokens,
+            'interval_output_tokens': self._sample_interval_output_tokens,
+            'interval_requests': self._sample_interval_requests,
+            'interval_sequences': self._sample_interval_sequences,
+            'interval_time': self._sample_interval_time,
+            'total_prompt_tokens': self._sample_total_prompt_tokens,
+            'total_output_tokens': self._sample_total_output_tokens,
+            'total_requests': self._sample_total_requests,
+            'total_sequences': self._sample_total_sequences,
+            'total_time': self._sample_total_time,
+        }
+        if reset:
+            self._sample_interval_prompt_tokens = 0
+            self._sample_interval_output_tokens = 0
+            self._sample_interval_requests = 0
+            self._sample_interval_sequences = 0
+            self._sample_interval_time = 0.0
+        return metrics
 
     @remote_function(dispatch='all', collect='first')
     def sleep(self, level: int = 1) -> None:

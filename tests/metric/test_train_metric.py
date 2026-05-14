@@ -13,12 +13,14 @@ def test_train_metric_reports_tokens_from_outputs():
         lr=[1e-4],
         step=2,
         gradient_accumulation_steps=1,
+        active_time=0.5,
     )
 
     results = metric.calculate()
 
     assert results['interval tokens'] == 5
     assert results['total tokens'] == 5
+    assert results['train/tokens/s'] == '10.00'
     assert 'tokens/s' in results
 
 

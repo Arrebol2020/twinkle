@@ -7,6 +7,7 @@ import os
 import random
 import re
 import threading
+import time
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -285,6 +286,7 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
         disable_lora = kwargs.pop('disable_lora', False)
         temperature = float(kwargs.pop('temperature', 1.0))
         forward_only = kwargs.pop('forward_only', False)
+        start_time = time.perf_counter()
         return_logits = kwargs.pop('return_logits', False)
         optimizer_config = self.optimizer_group[adapter_name]
         loss_instance = self.optimizer_group[adapter_name].loss_instance
@@ -502,9 +504,10 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
             optimizer_config.eval_status.forward_kwargs = kwargs
         else:
             optimizer_config.train_status.inputs = inputs
-            optimizer_config.train_status.outputs = ModelOutput(logits=logits, loss=loss, logps=logps)
+            optimizer_config.train_status.outputs = ModelOutput(logits=logits, loss=loss, logps=logps, num_tokens=count)
             optimizer_config.train_status.forward_kwargs = kwargs
-        return ModelOutput(logits=logits, loss=loss, logps=logps)
+            optimizer_config.train_status.active_time += time.perf_counter() - start_time
+        return ModelOutput(logits=logits, loss=loss, logps=logps, num_tokens=count)
 
     @remote_function(dispatch='all')
     def clip_grad_norm(self, max_grad_norm: float = 1.0, norm_type: int = 2, **kwargs):
@@ -795,9 +798,12 @@ class MegatronModel(TwinkleModel, nn.Module, CheckpointEngineMixin):
 
     @remote_function(dispatch='all')
     def clip_grad_and_step(self, max_grad_norm: float = 1.0, norm_type=2, **kwargs):
+        adapter_name = kwargs.get('adapter_name', self._get_default_group())
+        start_time = time.perf_counter()
         self.step(**kwargs)
         self.zero_grad(**kwargs)
         self.lr_step(**kwargs)
+        self.optimizer_group[adapter_name].train_status.active_time += time.perf_counter() - start_time
 
     @remote_function(dispatch='all', collect='first', sync=True)
     def save(self,

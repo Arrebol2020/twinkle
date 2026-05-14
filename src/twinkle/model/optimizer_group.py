@@ -24,6 +24,7 @@ class TrainStatus:
     num_tokens: int = 0
     metrics: List[Metric] = field(default_factory=list)
     forward_kwargs: Dict[str, Any] = field(default_factory=dict)
+    active_time: float = 0.0
 
 
 @dataclass
@@ -71,7 +72,9 @@ class BaseOptimizerGroup:
                     step=self.cur_step - 1,
                     gradient_accumulation_steps=self.gradient_accumulation_steps,
                     grad_norm=self._last_grad_norm,
+                    active_time=status.active_time,
                     **status.forward_kwargs)
+            status.active_time = 0.0
 
     def calculate_metrics(self, is_training):
         """Calculate and return metrics."""

@@ -72,3 +72,13 @@ class AddAdapterResponse(BaseModel):
 class CreateResponse(BaseModel):
     """Response body for the /create endpoint."""
     status: str = 'ok'
+
+
+class CalculateMetricRequest(BaseModel):
+    """Request body for the /calculate_metric endpoint."""
+    reset: bool = Field(True, description='Whether to reset interval sampler metrics after calculation')
+
+
+class CalculateMetricResponse(BaseModel):
+    """Response body for the /calculate_metric endpoint."""
+    result: Dict[str, Any] = Field(..., description='Sampler throughput metrics')

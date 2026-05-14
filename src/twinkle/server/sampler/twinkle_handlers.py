@@ -76,6 +76,17 @@ def _register_twinkle_sampler_routes(app: FastAPI, self_fn: Callable[[], Sampler
         """Health check / session creation endpoint."""
         return types.CreateResponse()
 
+    @app.post('/twinkle/calculate_metric', response_model=types.CalculateMetricResponse)
+    async def calculate_metric(
+            request: Request,
+            body: types.CalculateMetricRequest,
+            self: SamplerManagement = Depends(self_fn),
+    ) -> types.CalculateMetricResponse:
+        """Return sampler throughput metrics."""
+        await self._on_request_start(request)
+        ret = self.sampler.calculate_metric(reset=body.reset)
+        return types.CalculateMetricResponse(result=ret)
+
     @app.post('/twinkle/sample', response_model=types.SampleResponseModelList)
     async def sample(
         request: Request, body: types.SampleRequest,

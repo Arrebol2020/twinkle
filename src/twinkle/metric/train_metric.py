@@ -25,6 +25,8 @@ class TrainMetric(Metric):
         self.lrs = []
         self.total_tokens = 0
         self.interval_tokens = 0
+        self.total_active_time = 0.0
+        self.interval_active_time = 0.0
 
     def accumulate(self, inputs: Union[InputFeature, List[InputFeature]], outputs: ModelOutput, **kwargs):
         lr = kwargs.get('lr')
@@ -39,6 +41,9 @@ class TrainMetric(Metric):
         num_tokens = self._get_num_tokens(inputs, outputs)
         self.total_tokens += num_tokens
         self.interval_tokens += num_tokens
+        active_time = float(kwargs.get('active_time') or 0.0)
+        self.total_active_time += active_time
+        self.interval_active_time += active_time
 
     @staticmethod
     def _as_int(value):
@@ -75,6 +80,7 @@ class TrainMetric(Metric):
         self.time = time.time()
         self.last_step = self.step
         self.interval_tokens = 0
+        self.interval_active_time = 0.0
 
     def calculate(self):
         results = {}
@@ -100,5 +106,10 @@ class TrainMetric(Metric):
             results['tokens/s'] = f'{total_interval_tokens / interval:.2f}'
             results['interval tokens'] = total_interval_tokens
             results['total tokens'] = total_tokens
+            active_times = self.gather_results([self.interval_active_time])
+            active_time = max(active_times) if active_times else 0.0
+            if active_time > 0:
+                results['train/tokens/s'] = f'{total_interval_tokens / active_time:.2f}'
+                results['train/active time'] = f'{active_time:.2f} seconds'
         self.reset()
         return results

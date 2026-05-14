@@ -7,6 +7,7 @@ import os
 import random
 import re
 import threading
+import time
 import torch
 import torch.distributed as dist
 import transformers
@@ -114,7 +115,9 @@ class OptimizerGroup(BaseOptimizerGroup):
                     gradient_accumulation_steps=self.gradient_accumulation_steps,
                     grad_norm=self._last_grad_norm,
                     loss_reduction=getattr(self.loss_instance, 'reduction', 'mean'),
+                    active_time=status.active_time,
                     **status.forward_kwargs)
+            status.active_time = 0.0
 
 
 _default_adapter_name = ''
@@ -575,10 +578,13 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
         Returns:
             The output of the model forward.
         """
+        adapter_name = kwargs.get('adapter_name', self._get_default_group())
+        start_time = time.perf_counter()
         outputs = self.forward(inputs=inputs, **kwargs)
         loss = self.calculate_loss(**kwargs)
         outputs['loss'] = loss
         self.backward(**kwargs)
+        self.optimizer_group[adapter_name].train_status.active_time += time.perf_counter() - start_time
         return outputs
 
     @remote_function()
@@ -632,10 +638,13 @@ class TransformersModel(TwinkleModel, PreTrainedModel, CheckpointEngineMixin):
 
     @remote_function(dispatch='all')
     def clip_grad_and_step(self, max_grad_norm: float = 1.0, norm_type=2, **kwargs):
+        adapter_name = kwargs.get('adapter_name', self._get_default_group())
+        start_time = time.perf_counter()
         self.clip_grad_norm(max_grad_norm, norm_type, **kwargs)
         self.step(**kwargs)
         self.zero_grad(**kwargs)
         self.lr_step(**kwargs)
+        self.optimizer_group[adapter_name].train_status.active_time += time.perf_counter() - start_time
 
     def _create_param_group(self,
                             adapter_name: str,
